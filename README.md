@@ -1,4 +1,4 @@
-# Gitea-Interact
+![picture](banner.jpeg)
+
 Linux app to interact with Gitea Repos
 
-![picture](banner.jpeg)
