@@ -1,4 +1,4 @@
-![picture]([banner.jpeg](https://github.com/electricwildflower/Gitea-Interact/blob/main/icons/banner.jpeg))
+![picture]([banner.jpeg](icons/banner.jpeg)
 
 A small Linux desktop app (PyQt6) for interacting with Gitea repositories
 
