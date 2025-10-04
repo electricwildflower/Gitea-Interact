@@ -964,6 +964,11 @@ class RepoWindow(QWidget):
                 try:
                     # Reset to previous commit (hard reset)
                     repo.git.reset('--hard', 'HEAD~1')
+                    
+                    # Refresh current file if it's being viewed (since repo revert affects all files)
+                    if hasattr(self, 'current_file') and self.current_file:
+                        self.reload_current_file()
+                    
                     QMessageBox.information(self, "Success", f"Repository destructively reverted to previous commit - current commit permanently deleted")
                 except Exception as reset_error:
                     QMessageBox.warning(self, "Error", f"Failed to destructively revert repository: {str(reset_error)}")
@@ -1163,6 +1168,11 @@ class RepoWindow(QWidget):
             if reply == QMessageBox.StandardButton.Yes:
                 # Reset to previous commit
                 repo.git.reset('--hard', 'HEAD~1')
+                
+                # Refresh current file if it's being viewed (since repo revert affects all files)
+                if hasattr(self, 'current_file') and self.current_file:
+                    self.reload_current_file()
+                
                 QMessageBox.information(self, "Success", f"Repository reset destructively - removed commit {last_commit.hexsha[:8]}")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to reverse repository: {str(e)}")
@@ -1171,9 +1181,45 @@ class RepoWindow(QWidget):
         """Safe revert file to previous commit (keep history)"""
         try:
             import git
-            repo = git.Repo(file_path.parent)
+            # Find the repository root by walking up the directory tree
+            repo_path = Path(file_path)
+            while repo_path != repo_path.parent:
+                if (repo_path / '.git').exists():
+                    break
+                repo_path = repo_path.parent
+            else:
+                QMessageBox.warning(self, "Error", f"Could not find Git repository for file: {file_path}")
+                return
+            
+            repo = git.Repo(repo_path)
             # Get the last commit
             last_commit = repo.head.commit
+            
+            # Get relative path from repository root
+            relative_file_path = file_path.relative_to(repo_path)
+            
+            # Check if file exists in previous commit
+            try:
+                # Check if the file exists in HEAD~1
+                repo.git.show('HEAD~1:{}'.format(str(relative_file_path).replace('\\', '/')))
+                file_exists_in_previous = True
+            except Exception:
+                # File doesn't exist in previous commit
+                file_exists_in_previous = False
+            
+            if not file_exists_in_previous:
+                QMessageBox.warning(
+                    self, "Cannot Revert File",
+                    f"⚠️ Cannot revert file '{Path(file_path).name}' because it doesn't exist in the previous commit.\n\n"
+                    f"This usually means the file was:\n"
+                    f"• Added in the most recent commit\n"
+                    f"• Created after the previous commit\n\n"
+                    f"💡 Alternatives:\n"
+                    f"• Delete the file if you want to remove it\n"
+                    f"• Revert the entire repository to previous commit\n"
+                    f"• Manually edit the file to desired state"
+                )
+                return
             
             reply = QMessageBox.question(
                 self, "Safe Revert File (Keep History)",
@@ -1191,7 +1237,11 @@ class RepoWindow(QWidget):
             
             if reply == QMessageBox.StandardButton.Yes:
                 # Checkout the file from the previous commit
-                repo.git.checkout('HEAD~1', '--', str(file_path))
+                repo.git.checkout('HEAD~1', '--', str(relative_file_path))
+                
+                # Refresh the right panel if this file is currently being viewed
+                self.refresh_current_file_if_viewing(file_path)
+                
                 QMessageBox.information(self, "Success", f"File '{Path(file_path).name}' safely reverted to previous commit - history preserved")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to safely revert file: {str(e)}")
@@ -1200,9 +1250,45 @@ class RepoWindow(QWidget):
         """Destructive revert file to previous commit (delete history)"""
         try:
             import git
-            repo = git.Repo(file_path.parent)
+            # Find the repository root by walking up the directory tree
+            repo_path = Path(file_path)
+            while repo_path != repo_path.parent:
+                if (repo_path / '.git').exists():
+                    break
+                repo_path = repo_path.parent
+            else:
+                QMessageBox.warning(self, "Error", f"Could not find Git repository for file: {file_path}")
+                return
+            
+            repo = git.Repo(repo_path)
             # Get the last commit
             last_commit = repo.head.commit
+            
+            # Get relative path from repository root
+            relative_file_path = file_path.relative_to(repo_path)
+            
+            # Check if file exists in previous commit
+            try:
+                # Check if the file exists in HEAD~1
+                repo.git.show('HEAD~1:{}'.format(str(relative_file_path).replace('\\', '/')))
+                file_exists_in_previous = True
+            except Exception:
+                # File doesn't exist in previous commit
+                file_exists_in_previous = False
+            
+            if not file_exists_in_previous:
+                QMessageBox.warning(
+                    self, "Cannot Revert File",
+                    f"⚠️ Cannot revert file '{Path(file_path).name}' because it doesn't exist in the previous commit.\n\n"
+                    f"This usually means the file was:\n"
+                    f"• Added in the most recent commit\n"
+                    f"• Created after the previous commit\n\n"
+                    f"💡 Alternatives:\n"
+                    f"• Delete the file if you want to remove it\n"
+                    f"• Revert the entire repository to previous commit\n"
+                    f"• Manually edit the file to desired state"
+                )
+                return
             
             reply = QMessageBox.question(
                 self, "Destructive Revert File (Delete History)",
@@ -1220,10 +1306,83 @@ class RepoWindow(QWidget):
             
             if reply == QMessageBox.StandardButton.Yes:
                 # Reset the file to previous commit
-                repo.git.checkout('HEAD~1', '--', str(file_path))
+                repo.git.checkout('HEAD~1', '--', str(relative_file_path))
+                
+                # Refresh the right panel if this file is currently being viewed
+                self.refresh_current_file_if_viewing(file_path)
+                
                 QMessageBox.information(self, "Success", f"File '{Path(file_path).name}' destructively reverted to previous commit - history deleted")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to destructively revert file: {str(e)}")
+    
+    def refresh_current_file_if_viewing(self, reverted_file_path):
+        """Refresh the right panel content if the reverted file is currently being viewed"""
+        try:
+            # Check if the reverted file is currently being displayed
+            if hasattr(self, 'current_file') and self.current_file:
+                current_path = Path(self.current_file)
+                reverted_path = Path(reverted_file_path)
+                
+                # Compare paths (resolve any symlinks or relative paths)
+                if current_path.resolve() == reverted_path.resolve():
+                    # The reverted file is currently being viewed, refresh its content
+                    self.reload_current_file()
+                    
+        except Exception as e:
+            # Ignore errors if refresh fails
+            pass
+    
+    def reload_current_file(self):
+        """Reload the currently displayed file content"""
+        try:
+            if hasattr(self, 'current_file') and self.current_file:
+                path_obj = Path(self.current_file)
+                
+                if not path_obj.exists():
+                    return
+                
+                # Check file type and reload accordingly
+                suffix = path_obj.suffix.lower()
+                image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".svg"}
+                odt_exts = {".odt"}
+                
+                if suffix in image_exts:
+                    # Reload image
+                    if hasattr(self, 'image_label') and self.image_label is not None:
+                        try:
+                            pixmap = QPixmap(str(path_obj))
+                            if not pixmap.isNull():
+                                self.image_label.setPixmap(pixmap.scaled(
+                                    self.image_label.size(), 
+                                    Qt.AspectRatioMode.KeepAspectRatio, 
+                                    Qt.TransformationMode.SmoothTransformation
+                                ))
+                        except RuntimeError:
+                            pass
+                            
+                elif suffix in odt_exts:
+                    # Reload ODT file
+                    if hasattr(self, 'right_panel') and self.right_panel is not None:
+                        try:
+                            # Check if the right panel is an ODT editor
+                            if hasattr(self.right_panel, 'load_odt_file'):
+                                self.right_panel.load_odt_file(str(path_obj))
+                        except RuntimeError:
+                            pass
+                            
+                else:
+                    # Reload text file
+                    if hasattr(self, 'text_viewer') and self.text_viewer is not None:
+                        try:
+                            with open(path_obj, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                                self.text_viewer.setPlainText(content)
+                        except RuntimeError:
+                            pass
+                            
+        except Exception as e:
+            # Ignore errors if reload fails
+            pass
     
     def refresh_git_status(self, repo):
         """Force refresh of Git status to detect external changes"""
