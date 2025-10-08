@@ -1,3 +1,5 @@
+icons/banner.jpeg
+
 # Gitea Interact
 
 A small Linux desktop app (PyQt6) for interacting with Gitea repositories
