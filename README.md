@@ -8,13 +8,3 @@ With this small app you can connect to a Gitea install, download repos, edit fil
 
 Originally created by electricwildflower
 
-## Setup
-
-1. Install system dependencies:
-
-```bash
-sudo apt update
-sudo apt install $(cat system-deps.txt)
-
-xx
-
