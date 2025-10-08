@@ -1,4 +1,4 @@
-icons/banner.jpeg
+https://github.com/electricwildflower/Gitea-Interact/blob/main/icons/banner.jpeg
 
 # Gitea Interact
 
