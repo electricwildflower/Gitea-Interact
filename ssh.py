@@ -273,7 +273,7 @@ class SSHWindow(QWidget):
         layout.addWidget(header_label)
 
         # Instructions
-        info_label = QLabel("Copy this key to your Git server (GitHub, GitLab, Gitea, etc.) for authentication.")
+        info_label = QLabel("Copy this key to your Gitea server for authentication.")
         # Info label styling will be applied by theme
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
