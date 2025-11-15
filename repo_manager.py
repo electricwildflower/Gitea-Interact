@@ -6,7 +6,15 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from git import Repo
-from repo_utils import load_repos, update_repo_json, BASE_DIR
+from repo_utils import (
+    load_repos,
+    update_repo_json,
+    BASE_DIR,
+    derive_server_info,
+    build_repo_path,
+    repo_exists,
+    DEFAULT_SERVER_LABEL,
+)
 from theme_manager import ThemeManager
 
 class AddRepoPanel(QWidget):
@@ -60,7 +68,7 @@ class AddRepoPanel(QWidget):
         layout.addWidget(self.status_label)
 
         # Repositories list section
-        list_label = QLabel("📁 Repositories in ~/Gitea Repos:")
+        list_label = QLabel("📁 Repositories grouped by server:")
         # List label styling will be applied by theme
         layout.addWidget(list_label)
         
@@ -87,8 +95,12 @@ class AddRepoPanel(QWidget):
 
     def load_repos(self):
         self.repo_list.clear()
-        for repo in load_repos():
-            item = QListWidgetItem(repo["name"])
+        repos = load_repos()
+        for repo in sorted(repos, key=lambda r: ((r.get("server") or DEFAULT_SERVER_LABEL).lower(), r["name"].lower())):
+            server_label = repo.get("server") or DEFAULT_SERVER_LABEL
+            display = f"{repo['name']}  ·  {server_label}"
+            item = QListWidgetItem(display)
+            item.setData(Qt.ItemDataRole.UserRole, repo)
             self.repo_list.addItem(item)
 
     def add_repo(self):
@@ -98,14 +110,20 @@ class AddRepoPanel(QWidget):
             return
 
         repo_name = url.split("/")[-1].replace(".git", "")
-        repo_path = BASE_DIR / repo_name
+        server_label, server_folder = derive_server_info(url)
+        repo_path = build_repo_path(repo_name, server_folder)
+        repo_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if repo_path.exists():
-            QMessageBox.warning(self, "Error", f"Repository '{repo_name}' already exists.")
+        if repo_exists(repo_name, server_folder):
+            QMessageBox.warning(
+                self,
+                "Error",
+                f"Repository '{repo_name}' already exists under '{server_label}'."
+            )
             return
 
         try:
-            self.status_label.setText("Cloning repository...")
+            self.status_label.setText(f"Cloning into '{server_label}'...")
             self.add_btn.setEnabled(False)
             QApplication.processEvents()
 
@@ -125,7 +143,11 @@ class AddRepoPanel(QWidget):
             # Emit signal so left tree refreshes
             self.repo_changed.emit()
 
-            QMessageBox.information(self, "Success", f"Repository '{repo_name}' cloned successfully!")
+            QMessageBox.information(
+                self,
+                "Success",
+                f"Repository '{repo_name}' cloned to '{server_label}' successfully!"
+            )
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to clone repo:\n{e}")
@@ -139,16 +161,22 @@ class AddRepoPanel(QWidget):
             QMessageBox.warning(self, "Error", "Please select a repository to remove.")
             return
 
-        repo_name = selected.text()
-        repo_path = BASE_DIR / repo_name
+        repo_info = selected.data(Qt.ItemDataRole.UserRole) or {}
+        repo_name = repo_info.get("name", selected.text())
+        server_label = repo_info.get("server") or DEFAULT_SERVER_LABEL
+        repo_path = Path(repo_info.get("path", str(BASE_DIR / repo_name)))
         reply = QMessageBox.question(
             self,
             "Confirm Removal",
-            f"Are you sure you want to remove '{repo_name}'?\nThis will delete the folder but not the base 'Gitea Repos' directory.",
+            f"Remove '{repo_name}' from '{server_label}'?\n"
+            "This deletes the repository folder but not the base 'Gitea Repos' directory.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
             try:
+                if not repo_path.exists():
+                    QMessageBox.warning(self, "Error", f"Repository '{repo_name}' was not found on disk.")
+                    return
                 shutil.rmtree(repo_path)
                 update_repo_json()
                 self.load_repos()
@@ -156,7 +184,11 @@ class AddRepoPanel(QWidget):
                 # Emit signal so left tree refreshes immediately
                 self.repo_changed.emit()
 
-                QMessageBox.information(self, "Removed", f"Repository '{repo_name}' removed successfully!")
+                QMessageBox.information(
+                    self,
+                    "Removed",
+                    f"Repository '{repo_name}' removed from '{server_label}' successfully!"
+                )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to remove repo:\n{e}")
     

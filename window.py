@@ -5,12 +5,15 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from pathlib import Path
 from repo_manager import AddRepoPanel
-from repo_utils import load_repos, BASE_DIR
+from repo_utils import load_repos, BASE_DIR, DEFAULT_SERVER_LABEL
 from theme_manager import ThemeManager
 
 # --- Colors ---
 GITEA_GREEN = QColor("#2ea44f")
 GITEA_UNSAVED = QColor("#ff9900")
+ITEM_TYPE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+ITEM_TYPE_SERVER = "server"
+ITEM_TYPE_REPO = "repo"
 
 class RepoChangeHandler(FileSystemEventHandler):
     def __init__(self, browser):
@@ -121,56 +124,11 @@ class RepoWindow(QWidget):
 
     def force_refresh_tree(self):
         """Force a complete tree refresh"""
-        
-        # Save the currently expanded items
-        expanded_items = []
-        def save_expanded(item):
-            if item.isExpanded():
-                expanded_items.append(item.text(0))
-            for i in range(item.childCount()):
-                save_expanded(item.child(i))
-        
-        for i in range(self.tree.topLevelItemCount()):
-            save_expanded(self.tree.topLevelItem(i))
-        
-        
-        # Clear the tree completely
-        self.tree.clear()
-        
-        # Force Qt to process the clear
-        QApplication.processEvents()
-        
-        # Reload the repos from disk
-        self.repos = load_repos()
-        
-        # Rebuild the tree
-        for repo in self.repos:
-            repo_name = repo["name"]
-            repo_path = BASE_DIR / repo_name
-
-            if not repo_path.exists():
-                continue
-
-            repo_item = QTreeWidgetItem([repo_name])
-            repo_item.setData(0, Qt.ItemDataRole.UserRole, str(repo_path))
-            repo_item.setIcon(0, self.icon_provider.icon(QFileIconProvider.IconType.Folder))
-            repo_item.setForeground(0, QBrush(GITEA_GREEN))
-            self.tree.addTopLevelItem(repo_item)
-            
-            # Add dummy child for expandable folders
-            self.add_dummy(repo_item, repo_path)
-            
-            # Re-expand if it was expanded before
-            if repo_name in expanded_items:
-                repo_item.setExpanded(True)
-        
-        # Force the tree widget to update its display
+        expanded_items = self._capture_expanded_items()
+        self.rebuild_tree(expanded_items)
         self.tree.viewport().update()
         self.tree.repaint()
         QApplication.processEvents()
-        
-        
-        # Update file watchers
         self.update_watchers()
 
     def refresh_repos(self):
@@ -326,22 +284,7 @@ class RepoWindow(QWidget):
             self.current_file = None
 
     def build_initial_tree(self):
-        self.tree.clear()
-        self.repos = load_repos()
-
-        for repo in self.repos:
-            repo_name = repo["name"]
-            repo_path = BASE_DIR / repo_name
-
-            if not repo_path.exists():
-                continue
-
-            repo_item = QTreeWidgetItem([repo_name])
-            repo_item.setData(0, Qt.ItemDataRole.UserRole, str(repo_path))
-            repo_item.setIcon(0, self.icon_provider.icon(QFileIconProvider.IconType.Folder))
-            repo_item.setForeground(0, QBrush(GITEA_GREEN))
-            self.tree.addTopLevelItem(repo_item)
-            self.add_dummy(repo_item, repo_path)
+        self.rebuild_tree()
 
     def refresh_repository_tree(self):
         """Refresh the repository tree to sync with external changes"""
@@ -349,68 +292,100 @@ class RepoWindow(QWidget):
             # Disable the refresh button temporarily to prevent multiple clicks
             self.refresh_btn.setEnabled(False)
             self.refresh_btn.setText("⏳")
-            
-            # Save current expanded state
-            expanded_items = []
-            def save_expanded(item):
-                if item.isExpanded():
-                    expanded_items.append(item.data(0, Qt.ItemDataRole.UserRole))
-                for i in range(item.childCount()):
-                    save_expanded(item.child(i))
-            
-            for i in range(self.tree.topLevelItemCount()):
-                save_expanded(self.tree.topLevelItem(i))
-            
-            
-            # Clear the tree completely
-            self.tree.clear()
-            
-            # Force Qt to process the clear
-            QApplication.processEvents()
-            
-            # Reload repositories
-            self.repos = load_repos()
-            
-            # Rebuild the tree
-            for repo in self.repos:
-                repo_name = repo["name"]
-                repo_path = BASE_DIR / repo_name
-
-                if not repo_path.exists():
-                    continue
-
-                repo_item = QTreeWidgetItem([repo_name])
-                repo_item.setData(0, Qt.ItemDataRole.UserRole, str(repo_path))
-                repo_item.setIcon(0, self.icon_provider.icon(QFileIconProvider.IconType.Folder))
-                repo_item.setForeground(0, QBrush(GITEA_GREEN))
-                self.tree.addTopLevelItem(repo_item)
-                self.add_dummy(repo_item, repo_path)
-            
-            # Restore expanded state
-            def restore_expanded(item):
-                if item.data(0, Qt.ItemDataRole.UserRole) in expanded_items:
-                    item.setExpanded(True)
-                for i in range(item.childCount()):
-                    restore_expanded(item.child(i))
-            
-            for i in range(self.tree.topLevelItemCount()):
-                restore_expanded(self.tree.topLevelItem(i))
-            
-            # Update file watchers
+            expanded_items = self._capture_expanded_items()
+            self.rebuild_tree(expanded_items)
             self.update_watchers()
-            
-            # Force the tree widget to update its display
             self.tree.viewport().update()
             self.tree.repaint()
             QApplication.processEvents()
-            
-            
         except Exception as e:
             QMessageBox.warning(self, "Refresh Error", f"Failed to refresh repository tree: {str(e)}")
         finally:
             # Re-enable the refresh button
             self.refresh_btn.setEnabled(True)
             self.refresh_btn.setText("🔄")
+
+    def rebuild_tree(self, expanded_items=None):
+        self.tree.clear()
+        QApplication.processEvents()
+        self.repos = load_repos()
+        grouped = self.group_repos_by_server()
+
+        for server_label in grouped:
+            server_info = grouped[server_label]
+            server_item = QTreeWidgetItem([server_label])
+            server_item.setData(0, Qt.ItemDataRole.UserRole, server_info["path"])
+            server_item.setData(0, ITEM_TYPE_ROLE, ITEM_TYPE_SERVER)
+            server_item.setIcon(0, self.icon_provider.icon(QFileIconProvider.IconType.Folder))
+            server_item.setForeground(0, QBrush(GITEA_GREEN))
+            self.tree.addTopLevelItem(server_item)
+
+            for repo in server_info["repos"]:
+                repo_path = Path(repo["path"])
+                if not repo_path.exists():
+                    continue
+                repo_item = QTreeWidgetItem([repo["name"]])
+                repo_item.setData(0, Qt.ItemDataRole.UserRole, str(repo_path))
+                repo_item.setData(0, ITEM_TYPE_ROLE, ITEM_TYPE_REPO)
+                repo_item.setIcon(0, self.icon_provider.icon(QFileIconProvider.IconType.Folder))
+                repo_item.setForeground(0, QBrush(GITEA_GREEN))
+                server_item.addChild(repo_item)
+                self.add_dummy(repo_item, repo_path)
+
+        self._restore_expanded_items(expanded_items)
+
+    def group_repos_by_server(self):
+        grouped = {}
+        for repo in self.repos:
+            server_label = repo.get("server") or DEFAULT_SERVER_LABEL
+            server_folder = repo.get("server_folder")
+            if server_folder:
+                server_path = str(BASE_DIR / server_folder)
+            else:
+                server_path = str(BASE_DIR)
+
+            if server_label not in grouped:
+                grouped[server_label] = {"path": server_path, "repos": []}
+            grouped[server_label]["repos"].append(repo)
+
+        # Sort servers alphabetically, and repos within each server
+        grouped = dict(sorted(grouped.items(), key=lambda item: item[0].lower()))
+        for server_label in grouped:
+            grouped[server_label]["repos"].sort(key=lambda r: r["name"].lower())
+        return grouped
+
+    def _capture_expanded_items(self):
+        expanded = set()
+
+        def save_item(item):
+            if item.isExpanded():
+                expanded.add(self._get_item_identifier(item))
+            for i in range(item.childCount()):
+                save_item(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            save_item(self.tree.topLevelItem(i))
+        return expanded
+
+    def _restore_expanded_items(self, expanded_items):
+        if not expanded_items:
+            return
+        identifiers = set(expanded_items)
+
+        def restore_item(item):
+            if self._get_item_identifier(item) in identifiers:
+                item.setExpanded(True)
+            for i in range(item.childCount()):
+                restore_item(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            restore_item(self.tree.topLevelItem(i))
+
+    def _get_item_identifier(self, item):
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data:
+            return data
+        return f"server::{item.text(0)}"
 
     def add_dummy(self, item, path: Path):
         if path.is_dir() and any(path.iterdir()):
@@ -738,7 +713,7 @@ class RepoWindow(QWidget):
         self.observer = Observer()
         self.repos = load_repos()  # Reload repos
         for repo in self.repos:
-            repo_path = BASE_DIR / repo["name"]
+            repo_path = Path(repo["path"])
             if repo_path.exists():
                 handler = RepoChangeHandler(self)
                 self.observer.schedule(handler, str(repo_path), recursive=True)
@@ -764,14 +739,18 @@ class RepoWindow(QWidget):
             return
         
         path_obj = Path(path)
+        item_type = item.data(0, ITEM_TYPE_ROLE)
+
+        if item_type == ITEM_TYPE_SERVER:
+            return
         
         if path_obj.is_file():
             # File context menu
             self.create_file_context_menu(menu, path_obj, item)
-        elif path_obj.is_dir() and path_obj.parent.name == "Gitea Repos":
+        elif item_type == ITEM_TYPE_REPO:
             # Repository context menu (top-level directories)
             self.create_repo_context_menu(menu, path_obj, item)
-        else:
+        elif path_obj.is_dir():
             # Folder context menu (subdirectories)
             self.create_folder_context_menu(menu, path_obj, item)
         

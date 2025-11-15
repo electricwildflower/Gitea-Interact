@@ -5,11 +5,15 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 import requests
 import subprocess
-from pathlib import Path
 from api_config import load_api_settings, get_api_configs, get_api_config_by_name
 from theme_manager import ThemeManager
-
-BASE_DOWNLOAD_DIR = Path.home() / "Gitea Repos"
+from repo_utils import (
+    BASE_DIR,
+    derive_server_info,
+    build_repo_path,
+    get_existing_repo_names,
+    update_repo_json,
+)
 
 
 class UserManagerDialogue(QWidget):
@@ -22,6 +26,8 @@ class UserManagerDialogue(QWidget):
         self.settings = load_api_settings()
         self.selected_config = None
         self.downloaded_count = 0
+        self.current_server_label = None
+        self.current_server_folder = None
 
         # Main layout with scrollable area
         main_layout = QVBoxLayout(self)
@@ -148,9 +154,16 @@ class UserManagerDialogue(QWidget):
         current_data = self.config_combo.currentData()
         if current_data:
             self.selected_config = current_data
-            self.status_label.setText(f"Selected: {self.selected_config.get('name', 'Unnamed')} - {self.selected_config.get('server_url', 'No URL')}")
+            server_label, server_folder = derive_server_info(self.selected_config.get('server_url', ''))
+            self.current_server_label = server_label
+            self.current_server_folder = server_folder
+            self.status_label.setText(
+                f"Selected: {server_label} ({self.selected_config.get('server_url', 'No URL')})"
+            )
         else:
             self.selected_config = None
+            self.current_server_label = None
+            self.current_server_folder = None
 
     # -------------------------------
     # Fetch user repos from Gitea API
@@ -183,7 +196,10 @@ class UserManagerDialogue(QWidget):
         url = f"{server}/api/v1/users/{username}/repos"
         headers = {"Authorization": f"token {token}"}
 
-        self.status_label.setText("Fetching repositories...")
+        if not self.current_server_label or self.current_server_folder is None:
+            self.current_server_label, self.current_server_folder = derive_server_info(server)
+
+        self.status_label.setText(f"Fetching repositories from {self.current_server_label}...")
         self.fetch_button.setEnabled(False)
         QApplication.processEvents()
 
@@ -215,20 +231,20 @@ class UserManagerDialogue(QWidget):
             self.status_label.setText("No repositories found for this user.")
             self.download_button.setEnabled(False)
         else:
-            # Get existing repos to show status
-            from repo_utils import get_existing_repo_names
-            existing_repos = get_existing_repo_names()
+            # Get existing repos for this server to show status
+            existing_repos = get_existing_repo_names(self.current_server_folder)
             
             for repo in repos:
                 # Create a more informative display
                 repo_name = repo["name"]
                 repo_desc = repo.get("description", "No description")
+                prefix = f"[{self.current_server_label}] "
                 
                 # Check if repo already exists
                 if repo_name in existing_repos:
-                    display_text = f"✅ {repo_name} - {repo_desc[:40]}{'...' if len(repo_desc) > 40 else ''} (Already exists)"
+                    display_text = f"✅ {prefix}{repo_name} - {repo_desc[:40]}{'...' if len(repo_desc) > 40 else ''} (Already exists)"
                 else:
-                    display_text = f"{repo_name} - {repo_desc[:50]}{'...' if len(repo_desc) > 50 else ''}"
+                    display_text = f"{prefix}{repo_name} - {repo_desc[:50]}{'...' if len(repo_desc) > 50 else ''}"
                 
                 item = QListWidgetItem(display_text)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -247,9 +263,14 @@ class UserManagerDialogue(QWidget):
             new_count = len(repos) - existing_count
             
             if existing_count > 0:
-                self.status_label.setText(f"Found {len(repos)} repositories ({new_count} new, {existing_count} already exist). Select the ones you want to download.")
+                self.status_label.setText(
+                    f"Found {len(repos)} repositories on {self.current_server_label} "
+                    f"({new_count} new, {existing_count} already exist). Select the ones you want to download."
+                )
             else:
-                self.status_label.setText(f"Found {len(repos)} repositories. Select the ones you want to download.")
+                self.status_label.setText(
+                    f"Found {len(repos)} repositories on {self.current_server_label}. Select the ones you want to download."
+                )
             self.download_button.setEnabled(True)
 
         self.fetch_button.setEnabled(True)
@@ -279,11 +300,14 @@ class UserManagerDialogue(QWidget):
             QMessageBox.warning(self, "Error", "Please select a Gitea server configuration.")
             return
 
-        BASE_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        if not self.current_server_label:
+            server_url = self.selected_config.get('server_url', '')
+            self.current_server_label, self.current_server_folder = derive_server_info(server_url)
+
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
 
         # Check for existing repos and filter them out
-        from repo_utils import get_existing_repo_names
-        existing_repos = get_existing_repo_names()
+        existing_repos = get_existing_repo_names(self.current_server_folder)
         
         # Separate new repos from existing ones
         new_repos = []
@@ -330,14 +354,20 @@ class UserManagerDialogue(QWidget):
             owner = repo.get("owner", {}).get("login", username)  # fallback to username
             
             # Create URL with embedded credentials to avoid prompts
-            repo_url = f"{server}/{owner}/{repo_name}.git"
             # Embed credentials in URL: https://username:token@server/path
             token = self.selected_config.get('token', '')
-            auth_url = f"{server.replace('https://', f'https://{username}:{token}@')}/{owner}/{repo_name}.git"
+            if server.startswith("https://"):
+                auth_base = server.replace("https://", f"https://{username}:{token}@", 1)
+            elif server.startswith("http://"):
+                auth_base = server.replace("http://", f"http://{username}:{token}@", 1)
+            else:
+                auth_base = f"https://{username}:{token}@{server.lstrip('/')}"
+            auth_url = f"{auth_base}/{owner}/{repo_name}.git"
             
-            dest = BASE_DOWNLOAD_DIR / repo_name
+            dest = build_repo_path(repo_name, self.current_server_folder)
+            dest.parent.mkdir(parents=True, exist_ok=True)
 
-            self.status_label.setText(f"Cloning {repo_name}...")
+            self.status_label.setText(f"Cloning {repo_name} from {self.current_server_label}...")
             QApplication.processEvents()
             
             # Debug: print the URL being used (without password for security)
@@ -381,12 +411,11 @@ class UserManagerDialogue(QWidget):
         else:
             QMessageBox.information(self, "Download Complete", f"Successfully downloaded {self.downloaded_count} repositories!")
 
-        self.status_label.setText(f"Downloaded {self.downloaded_count} repositories.")
+        self.status_label.setText(f"Downloaded {self.downloaded_count} repositories to {self.current_server_label}.")
         
         # Update JSON file and emit signal to refresh the tree if any repos were downloaded
         if self.downloaded_count > 0:
             # Import here to avoid circular imports
-            from repo_utils import update_repo_json
             update_repo_json()
             self.repo_changed.emit()
 
